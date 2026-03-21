@@ -11,6 +11,7 @@
     "build": "tsup",
     "dev:collector": "tsx src/collector/index.ts",
     "dev:mcp": "tsx src/mcp/index.ts",
+    "sync": "tsx src/collector/sync.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -3,11 +3,9 @@ import { loadConfig } from "../shared/config.js";
 import { createDatabase } from "../shared/db/index.js";
 import { initSchema } from "../shared/db/schema.js";
 import { createAIProvider } from "../shared/ai/index.js";
-import { createSTTProvider } from "../shared/stt/index.js";
 import { createNotifiers } from "./notifier/index.js";
-import { createGeWeChatWebhookServer, normalizeMessage } from "./gewechat.js";
 import { KeywordMonitor } from "./monitor.js";
-import { insertMessage, upsertGroup, getUntranscribedVoiceMessages, updateMessageContent, incrementTranscriptionRetries } from "../shared/db/queries.js";
+import { syncWeChat } from "./sync.js";
 import { cleanupOldMessages, cleanupOldReports } from "../shared/db/queries.js";
 import cron from "node-cron";
 import { resolve } from "path";
@@ -19,45 +17,41 @@ const db = createDatabase(resolve(config.database.path));
 initSchema(db);
 
 const aiProvider = createAIProvider(config.ai);
-const sttProvider = createSTTProvider(config.stt);
 const notifiers = createNotifiers(config.notify);
 const monitor = new KeywordMonitor(db, config, aiProvider, notifiers);
 
-// ── GeweChat Webhook ──
+// ── Sync and Analyze ──
 
-const webhook = createGeWeChatWebhookServer(config.collector.port, (raw) => {
-  // Only process group messages
-  if (!raw.room_id) return;
+let lastSyncTime: string | null = null;
 
-  // Upsert group info
-  upsertGroup(db, { id: raw.room_id, name: raw.room_name, member_count: 0 });
+function runSyncAndAnalyze(): void {
+  try {
+    const result = syncWeChat(db, config);
+    console.log(
+      `[Collector] Sync complete: ${result.newMessages} new messages, ${result.newGroups} new groups`,
+    );
 
-  // Normalize and store message
-  const msg = normalizeMessage(raw);
-  insertMessage(db, msg);
-  console.log(`[Collector] Message from ${msg.sender_name} in ${raw.room_name}`);
-
-  // Notify monitor
-  monitor.onMessage({ ...msg, rowid: undefined });
-});
-
-// ── Voice Transcription Retry Job ──
-
-const sttRetryJob = cron.schedule("*/5 * * * *", async () => {
-  const untranscribed = getUntranscribedVoiceMessages(db);
-  for (const msg of untranscribed) {
-    if (!msg.media_url) continue;
-    try {
-      const text = await sttProvider.transcribe(msg.media_url);
-      updateMessageContent(db, msg.id, text);
-      console.log(`[STT] Transcribed voice message ${msg.id}`);
-      // Re-check against monitor with transcribed content
-      monitor.onMessage({ ...msg, content: text });
-    } catch (err) {
-      incrementTranscriptionRetries(db, msg.id);
-      console.error(`[STT] Failed to transcribe ${msg.id}:`, err);
+    // After sync, check new messages against subscriptions
+    if (result.newMessages > 0 && lastSyncTime) {
+      monitor
+        .checkNewMessages(lastSyncTime)
+        .catch((err) =>
+          console.error("[Collector] Error checking new messages:", err),
+        );
     }
+
+    // Update lastSyncTime for next run
+    lastSyncTime = result.lastTimestamp ?? new Date().toISOString();
+  } catch (err) {
+    console.error("[Collector] Sync failed:", err);
   }
+}
+
+// ── Periodic Sync Job ──
+
+const syncJob = cron.schedule(config.sync.cron, () => {
+  console.log("[Collector] Running scheduled sync...");
+  runSyncAndAnalyze();
 });
 
 // ── Data Retention Cleanup ──
@@ -71,18 +65,24 @@ const cleanupJob = cron.schedule(config.retention.cleanup_cron, () => {
 // ── Start ──
 
 async function main() {
-  await webhook.start();
+  // Run a full sync on startup
+  console.log("[Collector] Running initial sync...");
+  runSyncAndAnalyze();
+
+  // Start subscription cron jobs
   monitor.startCronJobs();
-  console.log(`[Collector] Started — webhook on port ${config.collector.port}`);
+
+  console.log(
+    `[Collector] Started — sync scheduled at: ${config.sync.cron}`,
+  );
 }
 
 // ── Graceful Shutdown ──
 
 process.on("SIGINT", () => {
   console.log("[Collector] Shutting down...");
-  webhook.stop();
   monitor.stop();
-  sttRetryJob.stop();
+  syncJob.stop();
   cleanupJob.stop();
   db.close();
   process.exit(0);

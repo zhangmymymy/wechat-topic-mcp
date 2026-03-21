@@ -109,9 +109,11 @@ export interface AnalysisResult {
 // ── Config Types ──
 
 export interface AppConfig {
-  gewechat: {
-    base_url: string;
-    callback_url: string;
+  sync: {
+    wechat_data_dir: string;
+    decrypt_output_dir: string;
+    keys_file: string;
+    cron: string;
   };
   database: {
     type: "sqlite" | "postgres";
@@ -124,11 +126,6 @@ export interface AppConfig {
     base_url?: string;
     model: string;
     max_context_messages: number;
-  };
-  stt: {
-    provider: "openai" | "azure" | "local";
-    api_key: string;
-    model: string;
   };
   notify: {
     telegram: {
@@ -153,9 +150,6 @@ export interface AppConfig {
   mcp: {
     port: number;
   };
-  collector: {
-    port: number;
-  };
 }
 
 // ── AI Provider Interface ──
@@ -165,35 +159,10 @@ export interface AIProvider {
   mergeReports(reports: AnalysisResult[], keyword: string): Promise<AnalysisResult>;
 }
 
-// ── STT Provider Interface ──
-
-export interface STTProvider {
-  transcribe(audioUrl: string): Promise<string>;
-}
-
 // ── Notifier Interface ──
 
 export interface Notifier {
   send(report: Report, groupName: string): Promise<void>;
-}
-
-// ── GeweChat Callback Types ──
-
-export interface GeWeChatMessage {
-  msg_id: string;
-  from_user: string;
-  from_user_name: string;
-  to_user: string;
-  msg_type: number;
-  content: string;
-  create_time: number;
-  room_id: string;
-  room_name: string;
-  voice_url?: string;
-  voice_duration?: number;
-  image_url?: string;
-  link_url?: string;
-  link_title?: string;
 }
 
 // ── Time Range ──

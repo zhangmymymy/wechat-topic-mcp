@@ -71,6 +71,37 @@ export class KeywordMonitor {
     }
   }
 
+  /**
+   * Check messages newer than the given timestamp against all enabled subscriptions.
+   * Called after each sync to process newly imported messages.
+   */
+  async checkNewMessages(since: string): Promise<void> {
+    const subs = getEnabledSubscriptions(this.db);
+    if (subs.length === 0) return;
+
+    const now = new Date().toISOString();
+    const groups = getAllGroups(this.db);
+
+    for (const group of groups) {
+      const messages = getMessagesByGroup(this.db, group.id, since, now);
+      if (messages.length === 0) continue;
+
+      for (const msg of messages) {
+        for (const sub of subs) {
+          if (sub.groups && !sub.groups.includes(msg.group_id)) continue;
+          if (!msg.content || !matchesKeyword(msg.content, sub.keyword, sub.match_mode)) continue;
+
+          // Track threshold triggers
+          if (sub.threshold) {
+            this.trackThreshold(sub, msg);
+          }
+        }
+      }
+    }
+
+    console.log(`[Monitor] Checked ${groups.length} groups for new messages since ${since}`);
+  }
+
   stop(): void {
     for (const job of this.cronJobs) {
       job.stop();

@@ -1,6 +1,8 @@
-gewechat:
-  base_url: "http://localhost:2531"
-  callback_url: "http://localhost:3001/webhook"
+sync:
+  wechat_data_dir: "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
+  decrypt_output_dir: "./data/decrypted"
+  keys_file: "./data/wechat_keys.json"
+  cron: "*/30 * * * *"
 
 database:
   type: "sqlite"
@@ -10,13 +12,8 @@ ai:
   provider: "openai"
   api_key: "${OPENAI_API_KEY}"
   # base_url: "https://api.example.com/v1"
-  model: "gpt-4o"
+  model: "gpt-5.4"
   max_context_messages: 200
-
-stt:
-  provider: "openai"
-  api_key: "${OPENAI_API_KEY}"
-  model: "whisper-1"
 
 notify:
   telegram:
@@ -38,6 +35,3 @@ retention:
 
 mcp:
   port: 3000
-
-collector:
-  port: 3001
