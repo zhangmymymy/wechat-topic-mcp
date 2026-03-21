@@ -171,6 +171,120 @@ src/
     └── tools/            # 9 MCP tool implementations
 ```
 
+## WeChat Database Decryption
+
+Mac WeChat 4.x stores all messages in **SQLCipher 4.0 encrypted** SQLite databases under:
+
+```
+~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/db_storage/
+```
+
+The databases include `message_0.db` (messages), `contact.db` (contacts), `session.db` (sessions), and more — all encrypted with a 32-byte key unique to each database.
+
+### How Decryption Works
+
+**Step 1: Extract encryption keys from memory**
+
+WeChat keeps the raw encryption keys in process memory while running. We use **lldb** (Apple's debugger) to attach to the WeChat process and scan its memory for the key pattern `x'<64-hex-key><32-hex-salt>'`. Each key is verified against its database's HMAC-SHA512 signature to confirm correctness.
+
+This step requires **SIP (System Integrity Protection) disabled** because macOS blocks debugger attachment to other processes when SIP is enabled.
+
+```bash
+# The script scans ~2.4GB of WeChat's memory and typically finds all 17 keys in under 60 seconds
+PYTHONPATH=$(/usr/bin/lldb -P) python3 find_key_memscan.py
+```
+
+Output: `wechat_keys.json` mapping each database file to its hex key.
+
+**Step 2: Decrypt databases with sqlcipher**
+
+Using the extracted keys, each database is decrypted via `sqlcipher` (open-source SQLite encryption extension):
+
+```sql
+PRAGMA key = "x'<hex_key>'";
+PRAGMA cipher_compatibility = 4;
+SELECT sqlcipher_export('plaintext');
+```
+
+```bash
+python3 decrypt_db.py
+```
+
+Output: Decrypted, standard SQLite databases in `data/decrypted/`.
+
+**Step 3: Parse and import messages**
+
+WeChat's message table naming uses MD5 hashes of the chat username:
+- `Name2Id` table maps `wxid/chatroom_id` → internal ID
+- Message table name = `Msg_` + `MD5(username)`
+- Group messages format: `sender_wxid:\nmessage_content`
+- XML messages (`<msg>`, `<?xml`) are system messages and skipped
+
+The sync module reads decrypted DBs, resolves sender names from the contact database, and imports text messages into our system with deduplication.
+
+### Tools Used
+
+| Tool | Purpose | Source |
+|------|---------|--------|
+| **lldb** | Attach to WeChat process, scan memory for encryption keys | Built into macOS (Xcode Command Line Tools) |
+| **sqlcipher** | Decrypt SQLCipher 4.0 encrypted SQLite databases | `brew install sqlcipher` |
+| **wechat-db-decrypt-macos** | Python scripts for key extraction and database decryption | [Thearas/wechat-db-decrypt-macos](https://github.com/Thearas/wechat-db-decrypt-macos) |
+| **better-sqlite3** | Read decrypted SQLite databases from Node.js | npm dependency |
+
+### Database Structure (Decrypted)
+
+```
+db_storage/
+├── message/
+│   ├── message_0.db          # Chat messages (main)
+│   ├── message_fts.db        # Full-text search index
+│   ├── media_0.db            # Media metadata
+│   └── biz_message_0.db      # Official account messages
+├── contact/
+│   ├── contact.db            # Contact list (nick_name, remark, etc.)
+│   └── contact_fts.db        # Contact search index
+├── session/
+│   └── session.db            # Chat sessions (last message, timestamp)
+├── favorite/
+│   └── favorite.db           # Saved messages
+├── sns/
+│   └── sns.db                # Moments (朋友圈)
+└── ...                        # emoticon, head_image, etc.
+```
+
+### Key Tables
+
+**message_0.db** — `Msg_<md5hash>` tables:
+| Column | Description |
+|--------|-------------|
+| `local_id` | Auto-increment primary key |
+| `server_id` | WeChat server message ID |
+| `create_time` | Unix timestamp |
+| `message_content` | Text content (group: `sender:\ncontent`) |
+| `local_type` | 1=text, 3=image, 34=voice, 49=link |
+
+**contact.db** — `contact` table:
+| Column | Description |
+|--------|-------------|
+| `username` | WeChat ID (wxid_xxx or phone) |
+| `nick_name` | Display name |
+| `remark` | User-set remark name |
+| `alias` | WeChat alias |
+
+**session.db** — `SessionTable`:
+| Column | Description |
+|--------|-------------|
+| `username` | Chat ID (wxid or xxx@chatroom) |
+| `summary` | Last message preview |
+| `last_timestamp` | Last activity time |
+
+### Security Notes
+
+- Encryption keys are **only accessible while WeChat is running** — they exist in process memory, not on disk
+- SIP must be disabled for key extraction but can be **re-enabled immediately after**
+- Keys may change when WeChat updates or you re-login on a new device
+- All decrypted data stays local — nothing is uploaded except through your configured notification channels
+
 ## Re-extracting Keys
 
 If WeChat updates or you re-login, you'll need to extract keys again (requires SIP disabled):
