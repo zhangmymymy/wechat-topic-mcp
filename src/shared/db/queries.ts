@@ -409,7 +409,7 @@ export function matchesKeyword(
 
   switch (mode) {
     case "exact":
-      return content.toLowerCase().includes(keyword.toLowerCase());
+      return content === keyword;
     case "fuzzy": {
       const lowerContent = content.toLowerCase();
       const lowerKeyword = keyword.toLowerCase();
