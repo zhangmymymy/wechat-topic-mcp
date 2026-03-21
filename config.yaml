@@ -1,0 +1,43 @@
+gewechat:
+  base_url: "http://localhost:2531"
+  callback_url: "http://localhost:3001/webhook"
+
+database:
+  type: "sqlite"
+  path: "./data/wechat.db"
+
+ai:
+  provider: "openai"
+  api_key: "${OPENAI_API_KEY}"
+  # base_url: "https://api.example.com/v1"
+  model: "gpt-4o"
+  max_context_messages: 200
+
+stt:
+  provider: "openai"
+  api_key: "${OPENAI_API_KEY}"
+  model: "whisper-1"
+
+notify:
+  telegram:
+    bot_token: "${TG_BOT_TOKEN}"
+    chat_id: "${TG_CHAT_ID}"
+  slack:
+    bot_token: "${SLACK_BOT_TOKEN}"
+    channel: "${SLACK_CHANNEL}"
+
+analysis:
+  context_before: 5
+  context_after: 10
+  cooldown_minutes: 30
+
+retention:
+  messages_days: 90
+  reports_days: 365
+  cleanup_cron: "0 3 * * *"
+
+mcp:
+  port: 3000
+
+collector:
+  port: 3001
