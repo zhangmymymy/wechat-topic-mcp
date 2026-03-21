@@ -42,11 +42,7 @@ function saveSyncState(dataDir: string, state: SyncState): void {
 // ── Step 1: Extract encryption keys ──
 
 function extractKeys(config: AppConfig["sync"]): void {
-  const scriptDir = resolve(config.wechat_data_dir, "..");
-  const findKeyScript = resolve(scriptDir, "find_key_memscan.py");
-
-  // Allow overriding the script path via environment variable or use a bundled path
-  const scriptPath = process.env.KEY_EXTRACT_SCRIPT ?? findKeyScript;
+  const scriptPath = process.env.KEY_EXTRACT_SCRIPT ?? resolve(config.scripts_dir, "find_key_memscan.py");
 
   if (!existsSync(scriptPath)) {
     console.log("[Sync] Key extraction script not found, skipping key extraction step");
@@ -68,6 +64,7 @@ function extractKeys(config: AppConfig["sync"]): void {
 
     execFileSync(pythonPath, [scriptPath], {
       encoding: "utf-8",
+      cwd: config.scripts_dir,
       env: {
         ...process.env,
         PYTHONPATH: lldbPythonPath,
@@ -88,10 +85,7 @@ function extractKeys(config: AppConfig["sync"]): void {
 // ── Step 2: Decrypt databases ──
 
 function decryptDatabases(config: AppConfig["sync"]): void {
-  const scriptDir = resolve(config.wechat_data_dir, "..");
-  const decryptScript = resolve(scriptDir, "decrypt_db.py");
-
-  const scriptPath = process.env.DECRYPT_SCRIPT ?? decryptScript;
+  const scriptPath = process.env.DECRYPT_SCRIPT ?? resolve(config.scripts_dir, "decrypt_db.py");
 
   if (!existsSync(scriptPath)) {
     console.log("[Sync] Decrypt script not found, skipping decryption step");
@@ -114,6 +108,7 @@ function decryptDatabases(config: AppConfig["sync"]): void {
 
     execFileSync(pythonPath, [scriptPath], {
       encoding: "utf-8",
+      cwd: config.scripts_dir,
       env: {
         ...process.env,
         WECHAT_DATA_DIR: config.wechat_data_dir,

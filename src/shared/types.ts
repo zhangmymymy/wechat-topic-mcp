@@ -113,6 +113,7 @@ export interface AppConfig {
     wechat_data_dir: string;
     decrypt_output_dir: string;
     keys_file: string;
+    scripts_dir: string;
     cron: string;
   };
   database: {
