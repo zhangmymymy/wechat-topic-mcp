@@ -1,39 +1,78 @@
 # WeChat Topic MCP
 
-Monitor WeChat group chats, analyze discussions by keyword, and get structured reports pushed to Telegram/Slack — all accessible via MCP (Model Context Protocol).
+Let Claude Code directly read and analyze your WeChat group chat messages via MCP (Model Context Protocol).
 
 ## How It Works
 
 ```
-Mac WeChat (running) → lldb memory scan → extract DB keys
-                                            ↓
-              Encrypted local SQLite DBs → decrypt → import messages
-                                                       ↓
-                                              System SQLite DB
-                                              ↓              ↓
-                                    MCP Server          Collector Service
-                                   (on-demand query)   (scheduled sync + auto push)
-                                         ↓                    ↓
-                                  Claude / IDE          Telegram / Slack
+WeChat (running on Mac)
+  → Frida hooks CCKeyDerivationPBKDF during startup
+  → captures PBKDF2-derived encryption keys for every database
+  → sqlcipher decrypts local SQLite DBs to plaintext
+  → messages imported into a system SQLite DB
+  → Claude Code queries and analyzes via MCP tools
 ```
 
-1. **Sync** — Extracts encryption keys from the running WeChat process, decrypts local message databases, and imports new messages into the system DB (incremental).
-2. **Analyze** — Given a keyword, uses AI (OpenAI/Claude/Ollama) to identify related messages across group chats, then generates a structured report with summary, sentiment, key opinions, disputes, and trends.
-3. **Push** — Sends reports to Telegram and/or Slack.
-4. **MCP** — Exposes 9 tools for Claude Desktop / Claude Code to query topics, manage subscriptions, browse reports, and monitor group activity.
+WeChat macOS 4.x encrypts all local databases with **SQLCipher 4** (AES-256-CBC, HMAC-SHA512, PBKDF2 with 256,000 iterations). Each database has a unique 32-byte encryption key derived from a shared master password and a per-database salt.
+
+The encryption library is **statically linked into the WeChat binary with all symbols stripped**, which means you cannot hook `sqlite3_key` via lldb, DYLD_INSERT_LIBRARIES, or Frida symbol lookup. However, the PBKDF2 key derivation ultimately calls macOS's `CCKeyDerivationPBKDF` from `libcommonCrypto.dylib` — a system export that Frida can always hook. This is the only reliable extraction method.
+
+### Key Derivation Structure
+
+```
+Master password (32 bytes, shared across all DBs)
+  + salt (first 16 bytes of each .db file, unique per DB)
+  + 256,000 rounds PBKDF2-HMAC-SHA512
+  = enc_key (32 bytes)  ← decrypts the database
+
+enc_key
+  + hmac_salt (from page content)
+  + 2 rounds PBKDF2-HMAC-SHA512
+  = hmac_key (32 bytes)  ← verifies page integrity
+```
+
+### Extraction Flow
+
+1. Frida spawns WeChat as a child process with hooks installed **before** any database opens
+2. WeChat starts up, opens all encrypted databases, triggering PBKDF2 calls
+3. The hook captures every call's `salt` (16 bytes) and `derivedKey` (32 bytes)
+4. Keys with `rounds=256000` are encryption keys; `rounds=2` are HMAC keys
+5. Each salt is matched to a `.db` file by comparing against the file's first 16 bytes
+6. Output: `data/wechat_keys.json` mapping each database path to its hex key
+
+### What Doesn't Work (verified)
+
+| Approach | Why it fails |
+|----------|-------------|
+| lldb breakpoint on system `sqlite3_key` | WeChat uses its own statically-linked SQLCipher, never calls the system library |
+| DYLD_INSERT_LIBRARIES interpose | Internal symbols can't be interposed |
+| Frida scan for `sqlite3_key` assembly pattern | Compiler optimizations produce unpredictable instruction sequences |
+| Memory scan for `x'<hex>'` key strings | Format varies across WeChat versions |
+| `task_for_pid` memory scanner | Requires root privileges |
+| pywxdump | Windows only |
+| wechat-db-decrypt-macos (Thearas) | DMCA'd by Tencent (Jan 2026) |
 
 ## Prerequisites
 
-- **macOS** (ARM64) with WeChat desktop installed and logged in
-- **SIP disabled** (required for lldb to attach to WeChat process for key extraction)
-- **sqlcipher**: `brew install sqlcipher`
+- **macOS** (Apple Silicon) with WeChat desktop installed and logged in
+- **SIP disabled** — required for Frida to attach to the WeChat process
+- **sqlcipher** — `brew install sqlcipher`
+- **Python 3 + Frida** — `pip3 install frida-tools` (use a venv if system Python blocks installation)
 - **Node.js** >= 18
-- **Python 3** (system or Homebrew, for key extraction scripts)
-- [wechat-db-decrypt-macos](https://github.com/Thearas/wechat-db-decrypt-macos) scripts cloned locally
 
-## Quick Start
+## Step-by-Step Setup
 
-### 1. Clone and install
+### 1. Disable SIP
+
+Restart your Mac → Hold power button → Enter Recovery Mode → Open Terminal:
+
+```bash
+csrutil disable
+```
+
+Reboot back to macOS. You can re-enable SIP after extracting keys.
+
+### 2. Clone and install
 
 ```bash
 git clone https://github.com/zhangmymymy/wechat-topic-mcp.git
@@ -41,62 +80,85 @@ cd wechat-topic-mcp
 npm install
 ```
 
-### 2. Clone the decrypt scripts
+### 3. Install Python dependencies
 
 ```bash
-git clone https://github.com/Thearas/wechat-db-decrypt-macos.git /tmp/wechat-decrypt
+pip3 install frida-tools
 ```
 
-### 3. Configure
+If your system Python blocks global installs, use a venv:
 
 ```bash
-cp .env.example .env
+python3 -m venv .venv
+source .venv/bin/activate
+pip install frida-tools
 ```
 
-Edit `.env` with your API keys:
+### 4. Extract encryption keys
 
-```
-OPENAI_API_KEY=sk-your-key
-TG_BOT_TOKEN=your-telegram-bot-token
-TG_CHAT_ID=your-telegram-chat-id
-```
-
-Edit `config.yaml` if needed (defaults should work for most setups):
-
-```yaml
-sync:
-  scripts_dir: "/tmp/wechat-decrypt"   # where you cloned the decrypt scripts
-  cron: "*/30 * * * *"                 # sync every 30 minutes
-
-ai:
-  provider: "openai"
-  model: "gpt-4o"                      # or gpt-5.4, claude, etc.
-```
-
-### 4. Extract keys and sync (first time)
-
-Make sure WeChat is running and logged in, then:
+Make sure **WeChat is running and logged in**, then:
 
 ```bash
+python3 scripts/extract_keys.py
+```
+
+This kills WeChat, re-launches it under Frida with the `CCKeyDerivationPBKDF` hook, captures all keys during startup, matches them to database files, and saves the result to `data/wechat_keys.json`.
+
+Expected output:
+
+```
+[*] Found 18 encrypted databases
+[*] Spawning WeChat with Frida hooks...
+[*] Resuming WeChat (waiting for DB opens)...
+  [+] Key captured: contact/contact.db
+  [+] Key captured: message/message_0.db
+  ...
+[*] All 18 keys captured!
+[*] Saved 18 keys to data/wechat_keys.json
+```
+
+### 5. Decrypt databases
+
+```bash
+python3 scripts/decrypt_dbs.py
+```
+
+This reads `data/wechat_keys.json`, decrypts each database using sqlcipher, and writes plaintext SQLite files to `data/decrypted/`.
+
+Expected output:
+
+```
+[*] Decrypting 18 databases...
+  contact/contact.db... OK (6.9 MB)
+  message/message_0.db... OK (16.5 MB)
+  message/message_1.db... OK (265.0 MB)
+  ...
+[*] Done: 18 decrypted, 0 failed
+```
+
+### 6. Build and import messages
+
+```bash
+npm run build
 npm run sync
 ```
 
-This will:
-- Attach to WeChat via lldb and extract all DB encryption keys
-- Decrypt the local WeChat SQLite databases
-- Import group chat messages into the system DB
+This reads the decrypted databases, resolves sender names from the contact DB, and imports all group chat text messages into `data/wechat.db` with deduplication.
 
-### 5. Start the Collector (auto sync + push)
+Expected output:
 
-```bash
-npm run dev:collector
+```
+[Sync] Loaded 11720 contacts
+[Sync] Found 44 group chats
+[Sync] Mapped 21 chats to message tables
+[Sync]   GoRich100X小分队: 4375 messages imported
+  ...
+[Sync] Import complete: 22489 messages, 14 new groups
 ```
 
-Runs a full sync on startup, then every 30 minutes. Automatically analyzes new messages against your keyword subscriptions and pushes reports.
+### 7. Configure MCP
 
-### 6. Use as MCP Server
-
-Add to your Claude Code `.mcp.json`:
+Add to your `~/.mcp.json`:
 
 ```json
 {
@@ -106,24 +168,32 @@ Add to your Claude Code `.mcp.json`:
       "args": ["dist/mcp/index.js"],
       "cwd": "/path/to/wechat-topic-mcp",
       "env": {
-        "OPENAI_API_KEY": "your-key",
-        "TG_BOT_TOKEN": "your-token",
-        "TG_CHAT_ID": "your-chat-id"
+        "CONFIG_PATH": "/path/to/wechat-topic-mcp/config.yaml"
       }
     }
   }
 }
 ```
 
-Build first: `npm run build`
+Replace `/path/to/wechat-topic-mcp` with the actual path where you cloned the repo.
+
+### 8. Use in Claude Code
+
+```
+> What are people saying about "AI Agent" in my WeChat groups?
+> Summarize discussions about Matrixport
+> Which group has been most active this week?
+```
+
+Claude Code reads raw messages from the system DB via MCP tools and analyzes them directly.
 
 ## MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `query_topic` | Analyze a keyword across group chats, returns AI-generated report |
 | `list_groups` | List all monitored WeChat groups |
-| `get_group_activity` | Activity stats for a group (messages, top users) |
+| `get_group_activity` | Activity stats for a group (message count, top users) |
+| `query_topic` | Analyze a keyword across group chats (requires AI provider in config) |
 | `add_subscription` | Subscribe to a keyword for auto push notifications |
 | `update_subscription` | Modify an existing subscription |
 | `remove_subscription` | Delete a subscription |
@@ -131,168 +201,88 @@ Build first: `npm run build`
 | `get_report` | Retrieve a specific analysis report |
 | `list_reports` | Browse historical reports |
 
-### Example Usage in Claude
+## Configuration
 
-```
-> Help me summarize what people are saying about "滑雪" in my WeChat groups
+Copy and edit the environment file:
 
-> Subscribe to keyword "AI Agent" and push to Telegram whenever there's discussion
-
-> Which group has been most active this week?
+```bash
+cp .env.example .env
 ```
 
-## Analysis Output
+Edit `.env` with your keys (all optional — Claude Code can query data without any AI provider):
 
-Each report includes:
+```
+OPENAI_API_KEY=sk-your-key          # for query_topic AI analysis
+TG_BOT_TOKEN=your-telegram-token     # for Telegram push
+TG_CHAT_ID=your-chat-id
+```
 
-- **Summary** — 3-5 sentence overview of the discussion
-- **Key Opinions** — Who said what, with stance (positive/neutral/negative)
-- **Sentiment** — Percentage breakdown (positive/neutral/negative)
-- **Disputes** — Identified disagreements between participants
-- **Trends** — Message count, participant count, density, duration
+Edit `config.yaml` to customize sync schedule, AI model, notification channels, etc.
+
+## Database Structure
+
+WeChat stores encrypted databases at:
+
+```
+~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/db_storage/
+├── message/message_0.db       # Chat messages (main)
+├── message/message_1.db       # Chat messages (overflow)
+├── contact/contact.db         # Contact list
+├── session/session.db         # Chat sessions
+├── favorite/favorite.db       # Saved messages
+├── sns/sns.db                 # Moments
+└── ...                        # emoticon, head_image, etc.
+```
+
+### Message Tables
+
+- `Name2Id` maps `wxid/chatroom_id` → internal ID
+- Message table name = `Msg_` + `MD5(username)`
+- Group message format: `sender_wxid:\nmessage_content`
+- `local_type`: 1=text, 3=image, 34=voice, 49=link
+- XML messages (`<msg>`, `<?xml`) are system messages — skipped during import
+
+## Re-extracting Keys
+
+Keys change when WeChat updates or you re-login on a new device. Re-run:
+
+```bash
+python3 scripts/extract_keys.py
+python3 scripts/decrypt_dbs.py
+npm run sync
+```
+
+SIP must be disabled for key extraction. You can re-enable it afterward:
+
+```bash
+# In Recovery Mode terminal:
+csrutil enable
+```
+
+## Security Notes
+
+- Encryption keys only exist in WeChat's process memory while it's running — not stored on disk
+- SIP can be re-enabled immediately after key extraction
+- All decrypted data stays local — nothing is uploaded unless you configure notification channels
+- Keys are saved to `data/wechat_keys.json` for subsequent syncs without re-extraction
 
 ## Project Structure
 
 ```
+scripts/
+├── extract_keys.py      # Frida-based key extraction
+└── decrypt_dbs.py       # sqlcipher batch decryption
 src/
-├── collector/           # Sync pipeline + auto analysis
-│   ├── index.ts         # Entry point (cron scheduler)
+├── collector/           # Sync pipeline + scheduled analysis
 │   ├── sync.ts          # Key extraction → decrypt → import
-│   ├── monitor.ts       # Keyword monitoring & threshold triggers
-│   └── notifier/        # Telegram & Slack push
-├── shared/              # Shared modules
+│   └── monitor.ts       # Keyword monitoring & triggers
+├── shared/
 │   ├── ai/              # AI provider (OpenAI/Claude/Ollama)
-│   ├── analyzer/        # Message segmentation & report building
 │   ├── db/              # SQLite schema & queries
-│   ├── config.ts        # YAML config with env var interpolation
-│   └── types.ts         # TypeScript interfaces
-└── mcp/                 # MCP Server
-    ├── index.ts          # Server entry point
+│   └── config.ts        # YAML config with env var interpolation
+└── mcp/
+    ├── index.ts          # MCP server entry point
     └── tools/            # 9 MCP tool implementations
-```
-
-## WeChat Database Decryption
-
-Mac WeChat 4.x stores all messages in **SQLCipher 4.0 encrypted** SQLite databases under:
-
-```
-~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/db_storage/
-```
-
-The databases include `message_0.db` (messages), `contact.db` (contacts), `session.db` (sessions), and more — all encrypted with a 32-byte key unique to each database.
-
-### How Decryption Works
-
-**Step 1: Extract encryption keys from memory**
-
-WeChat keeps the raw encryption keys in process memory while running. We use **lldb** (Apple's debugger) to attach to the WeChat process and scan its memory for the key pattern `x'<64-hex-key><32-hex-salt>'`. Each key is verified against its database's HMAC-SHA512 signature to confirm correctness.
-
-This step requires **SIP (System Integrity Protection) disabled** because macOS blocks debugger attachment to other processes when SIP is enabled.
-
-```bash
-# The script scans ~2.4GB of WeChat's memory and typically finds all 17 keys in under 60 seconds
-PYTHONPATH=$(/usr/bin/lldb -P) python3 find_key_memscan.py
-```
-
-Output: `wechat_keys.json` mapping each database file to its hex key.
-
-**Step 2: Decrypt databases with sqlcipher**
-
-Using the extracted keys, each database is decrypted via `sqlcipher` (open-source SQLite encryption extension):
-
-```sql
-PRAGMA key = "x'<hex_key>'";
-PRAGMA cipher_compatibility = 4;
-SELECT sqlcipher_export('plaintext');
-```
-
-```bash
-python3 decrypt_db.py
-```
-
-Output: Decrypted, standard SQLite databases in `data/decrypted/`.
-
-**Step 3: Parse and import messages**
-
-WeChat's message table naming uses MD5 hashes of the chat username:
-- `Name2Id` table maps `wxid/chatroom_id` → internal ID
-- Message table name = `Msg_` + `MD5(username)`
-- Group messages format: `sender_wxid:\nmessage_content`
-- XML messages (`<msg>`, `<?xml`) are system messages and skipped
-
-The sync module reads decrypted DBs, resolves sender names from the contact database, and imports text messages into our system with deduplication.
-
-### Tools Used
-
-| Tool | Purpose | Source |
-|------|---------|--------|
-| **lldb** | Attach to WeChat process, scan memory for encryption keys | Built into macOS (Xcode Command Line Tools) |
-| **sqlcipher** | Decrypt SQLCipher 4.0 encrypted SQLite databases | `brew install sqlcipher` |
-| **wechat-db-decrypt-macos** | Python scripts for key extraction and database decryption | [Thearas/wechat-db-decrypt-macos](https://github.com/Thearas/wechat-db-decrypt-macos) |
-| **better-sqlite3** | Read decrypted SQLite databases from Node.js | npm dependency |
-
-### Database Structure (Decrypted)
-
-```
-db_storage/
-├── message/
-│   ├── message_0.db          # Chat messages (main)
-│   ├── message_fts.db        # Full-text search index
-│   ├── media_0.db            # Media metadata
-│   └── biz_message_0.db      # Official account messages
-├── contact/
-│   ├── contact.db            # Contact list (nick_name, remark, etc.)
-│   └── contact_fts.db        # Contact search index
-├── session/
-│   └── session.db            # Chat sessions (last message, timestamp)
-├── favorite/
-│   └── favorite.db           # Saved messages
-├── sns/
-│   └── sns.db                # Moments (朋友圈)
-└── ...                        # emoticon, head_image, etc.
-```
-
-### Key Tables
-
-**message_0.db** — `Msg_<md5hash>` tables:
-| Column | Description |
-|--------|-------------|
-| `local_id` | Auto-increment primary key |
-| `server_id` | WeChat server message ID |
-| `create_time` | Unix timestamp |
-| `message_content` | Text content (group: `sender:\ncontent`) |
-| `local_type` | 1=text, 3=image, 34=voice, 49=link |
-
-**contact.db** — `contact` table:
-| Column | Description |
-|--------|-------------|
-| `username` | WeChat ID (wxid_xxx or phone) |
-| `nick_name` | Display name |
-| `remark` | User-set remark name |
-| `alias` | WeChat alias |
-
-**session.db** — `SessionTable`:
-| Column | Description |
-|--------|-------------|
-| `username` | Chat ID (wxid or xxx@chatroom) |
-| `summary` | Last message preview |
-| `last_timestamp` | Last activity time |
-
-### Security Notes
-
-- Encryption keys are **only accessible while WeChat is running** — they exist in process memory, not on disk
-- SIP must be disabled for key extraction but can be **re-enabled immediately after**
-- Keys may change when WeChat updates or you re-login on a new device
-- All decrypted data stays local — nothing is uploaded except through your configured notification channels
-
-## Re-extracting Keys
-
-If WeChat updates or you re-login, you'll need to extract keys again (requires SIP disabled):
-
-```bash
-# Disable SIP: restart → hold power → Recovery → Terminal → csrutil disable
-npm run sync
-# Re-enable SIP after: csrutil enable
 ```
 
 ## License

@@ -2,8 +2,8 @@
 /**
  * WeChat local database sync pipeline.
  * Replaces the GeweChat webhook-based collector with a three-step process:
- *   1. Extract encryption keys from running WeChat via lldb memory scan
- *   2. Decrypt WeChat SQLite databases using extracted keys
+ *   1. Extract encryption keys via Frida hook on CCKeyDerivationPBKDF
+ *   2. Decrypt WeChat SQLite databases using sqlcipher
  *   3. Import decrypted messages into our system database
  */
 import { execFileSync } from "child_process";
@@ -42,36 +42,30 @@ function saveSyncState(dataDir: string, state: SyncState): void {
 // ── Step 1: Extract encryption keys ──
 
 function extractKeys(config: AppConfig["sync"]): void {
-  const scriptPath = process.env.KEY_EXTRACT_SCRIPT ?? resolve(config.scripts_dir, "find_key_memscan.py");
+  const scriptPath = resolve("scripts", "extract_keys.py");
 
   if (!existsSync(scriptPath)) {
-    console.log("[Sync] Key extraction script not found, skipping key extraction step");
+    console.log("[Sync] Key extraction script not found, skipping");
     console.log(`[Sync] Expected at: ${scriptPath}`);
-    console.log("[Sync] Will try to use existing keys file if available");
     return;
   }
 
-  console.log("[Sync] Extracting encryption keys from WeChat process...");
+  console.log("[Sync] Extracting encryption keys via Frida...");
 
   try {
-    const pythonPath = "/Library/Developer/CommandLineTools/usr/bin/python3";
-    const lldbPythonPath = execFileSync("/usr/bin/lldb", ["-P"], {
-      encoding: "utf-8",
-    }).trim();
-
     const keysDir = resolve(config.keys_file, "..");
     mkdirSync(keysDir, { recursive: true });
 
-    execFileSync(pythonPath, [scriptPath], {
+    const python = process.env.PYTHON_PATH ?? "python3";
+
+    execFileSync(python, [scriptPath], {
       encoding: "utf-8",
-      cwd: config.scripts_dir,
       env: {
         ...process.env,
-        PYTHONPATH: lldbPythonPath,
-        WECHAT_KEYS_OUTPUT: config.keys_file,
+        WECHAT_KEYS_OUTPUT: resolve(config.keys_file),
       },
       timeout: 120_000,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: "inherit",
     });
 
     console.log("[Sync] Keys extracted successfully");
@@ -85,16 +79,15 @@ function extractKeys(config: AppConfig["sync"]): void {
 // ── Step 2: Decrypt databases ──
 
 function decryptDatabases(config: AppConfig["sync"]): void {
-  const scriptPath = process.env.DECRYPT_SCRIPT ?? resolve(config.scripts_dir, "decrypt_db.py");
+  const scriptPath = resolve("scripts", "decrypt_dbs.py");
 
   if (!existsSync(scriptPath)) {
-    console.log("[Sync] Decrypt script not found, skipping decryption step");
+    console.log("[Sync] Decrypt script not found, skipping");
     console.log(`[Sync] Expected at: ${scriptPath}`);
-    console.log("[Sync] Will try to use existing decrypted databases if available");
     return;
   }
 
-  if (!existsSync(config.keys_file)) {
+  if (!existsSync(resolve(config.keys_file))) {
     console.log("[Sync] Keys file not found, skipping decryption step");
     return;
   }
@@ -102,21 +95,19 @@ function decryptDatabases(config: AppConfig["sync"]): void {
   console.log("[Sync] Decrypting WeChat databases...");
 
   try {
-    const pythonPath = "/Library/Developer/CommandLineTools/usr/bin/python3";
+    mkdirSync(resolve(config.decrypt_output_dir), { recursive: true });
 
-    mkdirSync(config.decrypt_output_dir, { recursive: true });
+    const python = process.env.PYTHON_PATH ?? "python3";
 
-    execFileSync(pythonPath, [scriptPath], {
+    execFileSync(python, [scriptPath], {
       encoding: "utf-8",
-      cwd: config.scripts_dir,
       env: {
         ...process.env,
-        WECHAT_DATA_DIR: config.wechat_data_dir,
-        WECHAT_KEYS_FILE: config.keys_file,
-        DECRYPT_OUTPUT_DIR: config.decrypt_output_dir,
+        WECHAT_KEYS_FILE: resolve(config.keys_file),
+        DECRYPT_OUTPUT_DIR: resolve(config.decrypt_output_dir),
       },
       timeout: 300_000,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: "inherit",
     });
 
     console.log("[Sync] Databases decrypted successfully");

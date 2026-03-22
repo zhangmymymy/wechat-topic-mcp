@@ -2,7 +2,6 @@ sync:
   wechat_data_dir: "${HOME}/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
   decrypt_output_dir: "./data/decrypted"
   keys_file: "./data/wechat_keys.json"
-  scripts_dir: "/tmp/wechat-decrypt"
   cron: "*/30 * * * *"
 
 database:
