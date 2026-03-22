@@ -21,6 +21,7 @@ export interface Message {
   msg_type: "text" | "voice" | "image" | "link" | "file";
   is_transcribed: boolean;
   timestamp: string;
+  source?: "ilink" | "local_db";
 }
 
 export interface Subscription {
@@ -113,7 +114,11 @@ export interface AppConfig {
     wechat_data_dir: string;
     decrypt_output_dir: string;
     keys_file: string;
+    scripts_dir?: string;
     cron: string;
+  };
+  ilink?: {
+    enabled: boolean;
   };
   database: {
     type: "sqlite" | "postgres";

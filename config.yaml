@@ -1,3 +1,6 @@
+ilink:
+  enabled: true
+
 sync:
   wechat_data_dir: "${HOME}/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
   decrypt_output_dir: "./data/decrypted"

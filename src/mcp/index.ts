@@ -9,6 +9,8 @@ import { registerQueryTopicTool } from "./tools/query-topic.js";
 import { registerSubscriptionTools } from "./tools/subscriptions.js";
 import { registerReportTools } from "./tools/reports.js";
 import { registerGroupTools } from "./tools/groups.js";
+import { registerConnectTools } from "./tools/connect.js";
+import { registerSyncTools } from "./tools/sync-history.js";
 import { resolve } from "path";
 import "dotenv/config";
 
@@ -28,6 +30,8 @@ registerQueryTopicTool(server, db, aiProvider, config);
 registerSubscriptionTools(server, db);
 registerReportTools(server, db);
 registerGroupTools(server, db);
+registerConnectTools(server);
+registerSyncTools(server, db, config);
 
 async function main() {
   const transport = new StdioServerTransport();

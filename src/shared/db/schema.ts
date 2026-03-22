@@ -21,7 +21,8 @@ export function initSchema(db: Database.Database): void {
       msg_type      TEXT NOT NULL DEFAULT 'text',
       is_transcribed INTEGER DEFAULT 0,
       transcription_retries INTEGER DEFAULT 0,
-      timestamp     DATETIME NOT NULL
+      timestamp     DATETIME NOT NULL,
+      source        TEXT DEFAULT 'local_db'
     );
 
     CREATE INDEX IF NOT EXISTS idx_messages_group_time

@@ -7,6 +7,7 @@ import { createNotifiers } from "./notifier/index.js";
 import { KeywordMonitor } from "./monitor.js";
 import { syncWeChat } from "./sync.js";
 import { cleanupOldMessages, cleanupOldReports } from "../shared/db/queries.js";
+import { ILinkPoller, loadCredentials } from "./ilink.js";
 import cron from "node-cron";
 import { resolve } from "path";
 import "dotenv/config";
@@ -62,18 +63,47 @@ const cleanupJob = cron.schedule(config.retention.cleanup_cron, () => {
   console.log(`[Cleanup] Removed ${msgCount} messages, ${reportCount} reports`);
 });
 
+// ── iLink Real-time Polling ──
+
+let poller: ILinkPoller | null = null;
+
+function startILinkPolling(): void {
+  const credentials = loadCredentials();
+  if (!credentials) {
+    console.log("[Collector] No iLink credentials found. Skipping real-time polling.");
+    console.log("[Collector] Use connect_wechat MCP tool to authenticate.");
+    return;
+  }
+
+  poller = new ILinkPoller(credentials);
+  poller.start(db, () => {
+    // On each new message, check subscriptions
+    const now = new Date().toISOString();
+    monitor
+      .checkNewMessages(now)
+      .catch((err) =>
+        console.error("[Collector] Error checking new messages:", err),
+      );
+  }).catch((err) => {
+    console.error("[Collector] iLink polling error:", err);
+  });
+}
+
 // ── Start ──
 
 async function main() {
-  // Run a full sync on startup
+  // Run a full local DB sync on startup
   console.log("[Collector] Running initial sync...");
   runSyncAndAnalyze();
+
+  // Start iLink real-time polling if credentials exist
+  startILinkPolling();
 
   // Start subscription cron jobs
   monitor.startCronJobs();
 
   console.log(
-    `[Collector] Started — sync scheduled at: ${config.sync.cron}`,
+    `[Collector] Started — local sync: ${config.sync.cron}, iLink: ${poller ? "active" : "inactive"}`,
   );
 }
 
@@ -81,6 +111,7 @@ async function main() {
 
 process.on("SIGINT", () => {
   console.log("[Collector] Shutting down...");
+  poller?.stop();
   monitor.stop();
   syncJob.stop();
   cleanupJob.stop();
